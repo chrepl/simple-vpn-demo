@@ -21,7 +21,7 @@
 // #define AS_CLIENT YES
 // #define SERVER_HOST ""
 
-#define PORT 54345
+#define PORT 22
 #define MTU 1400
 #define BIND_HOST "0.0.0.0"
 
