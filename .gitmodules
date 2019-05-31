@@ -1,0 +1,4 @@
+[submodule "shrlib/tiny-AES-c"]
+	path = shrlib/tiny-AES-c
+	url = https://github.com/kokke/tiny-AES-c
+	branch = master

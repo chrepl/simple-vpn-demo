@@ -13,18 +13,49 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 
+#define CBC 0
+#define CTR 1
+#define ECB 0
+
+#include "aes.h"
+
 /*
  * The following lines serve as configurations
  * Uncomment first 2 lines to run as vpn client
  */
 
-// #define AS_CLIENT YES
-// #define SERVER_HOST ""
 
-#define PORT 22
+// #define DEBUG
+
+#define REUSE_KEY_IV
+
+#if defined (AS_CLIENT)
+# define SERVER_HOST ""
+#endif
+
+#define PORT 8080
 #define MTU 1400
 #define BIND_HOST "0.0.0.0"
 
+#define LF "\n"
+
+#define NEW0(x) (x*) calloc (1, sizeof (x))
+
+#if defined (AES256) && defined (REUSE_KEY_IV)
+  // TODO: iv/nonce should be not be reused only for testing
+  static const uint8_t key[32] = {
+    0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81,
+    0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3, 0x09, 0x14, 0xdf, 0xf4
+  };
+  static const uint8_t iv[16]  = {
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+    0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff
+  };
+#else
+# error "Not implemented yet"
+#endif
+
+static struct AES_ctx *aes_ctx;
 
 static int max(int a, int b) {
   return a > b ? a : b;
@@ -227,12 +258,12 @@ void cleanup_when_sig_exit() {
  * A comprehensive encryption is not easy and not the point for this demo
  * I'll just leave the stubs here
  */
-void encrypt(char *plantext, char *ciphertext, int len) {
-  memcpy(ciphertext, plantext, len);
+void encrypt(char *plaintext, int len) {
+  AES_CTR_xcrypt_buffer (aes_ctx, plaintext, len);
 }
 
-void decrypt(char *ciphertext, char *plantext, int len) {
-  memcpy(plantext, ciphertext, len);
+void decrypt(char *ciphertext, int len) {
+  AES_CTR_xcrypt_buffer (aes_ctx, ciphertext, len);
 }
 
 
@@ -257,12 +288,13 @@ int main(int argc, char **argv) {
 
 
   /*
-   * tun_buf - memory buffer read from/write to tun dev - is always plain
-   * udp_buf - memory buffer read from/write to udp fd - is always encrypted
+   * buf - memory buffer read from/write to tun and udp fd - plain / encrypted
    */
-  char tun_buf[MTU], udp_buf[MTU];
-  bzero(tun_buf, MTU);
-  bzero(udp_buf, MTU);
+  char buf[MTU];
+  bzero(buf, MTU);
+
+  aes_ctx = NEW0 (struct AES_ctx);
+  AES_init_ctx_iv (aes_ctx, key, iv);
 
   while (1) {
     fd_set readset;
@@ -278,49 +310,106 @@ int main(int argc, char **argv) {
 
     int r;
     if (FD_ISSET(tun_fd, &readset)) {
-      r = read(tun_fd, tun_buf, MTU);
+#if defined (DEBUG)
+      printf (">>>>>" LF);
+#endif
+      r = read(tun_fd, buf, MTU);
       if (r < 0) {
         // TODO: ignore some errno
         perror("read from tun_fd error");
         break;
       }
 
-      encrypt(tun_buf, udp_buf, r);
-      printf("Writing to UDP %d bytes ...\n", r);
+#if defined (DEBUG)
+      printf ("Payload to send:");
+      for (int x = 0; x < r; x++) {
+        if (x % 6 == 0) {
+          printf ("\n\t");
+        }
+        printf ("0x%02hhx ", buf[x]);
+      }
+      printf ("\n");
+#endif
+      AES_ctx_set_iv (aes_ctx, iv);
+      encrypt (buf, r);
+      printf(">> Writing to UDP %d bytes ...\n", r);
 
-      r = sendto(udp_fd, udp_buf, r, 0, (const struct sockaddr *)&client_addr, client_addrlen);
+#if defined (DEBUG)
+      printf ("Encrypted payload:");
+      for (int x = 0; x < r; x++) {
+        if (x % 6 == 0) {
+          printf ("\n\t");
+        }
+        printf ("0x%02hhx ", buf[x]);
+      }
+      printf ("\n");
+#endif
+      r = sendto(udp_fd, buf, r, 0, (const struct sockaddr *)&client_addr, client_addrlen);
       if (r < 0) {
         // TODO: ignore some errno
         perror("sendto udp_fd error");
         break;
       }
+#if defined (DEBUG)
+      printf ("<<<<<<" LF);
+#endif
     }
 
     if (FD_ISSET(udp_fd, &readset)) {
-      r = recvfrom(udp_fd, udp_buf, MTU, 0, (struct sockaddr *)&client_addr, &client_addrlen);
+#if defined (DEBUG)
+      printf ("<<<<<<" LF);
+#endif
+      r = recvfrom(udp_fd, buf, MTU, 0, (struct sockaddr *)&client_addr, &client_addrlen);
       if (r < 0) {
         // TODO: ignore some errno
         perror("recvfrom udp_fd error");
         break;
       }
 
-      decrypt(udp_buf, tun_buf, r);
-      printf("Writing to tun %d bytes ...\n", r);
+#if defined (DEBUG)
+      printf ("Recieved payload:");
+      for (int x = 0; x < r; x++) {
+        if (x % 6 == 0) {
+          printf ("\n\t");
+        }
+        printf ("0x%02hhx ", buf[x]);
+      }
+      printf ("\n");
+#endif
+      // TODO: iv/nonce should be not be reused anymore
+      AES_ctx_set_iv (aes_ctx, iv);
+      decrypt (buf, r);
+      printf(">> Writing to tun %d bytes ...\n", r);
 
-      r = write(tun_fd, tun_buf, r);
+#if defined (DEBUG)
+      printf ("Decrypted payload:");
+      for (int x = 0; x < r; x++) {
+        if (x % 6 == 0) {
+          printf ("\n\t");
+        }
+        printf ("0x%02hhx ", buf[x]);
+      }
+      printf ("\n");
+#endif
+      r = write(tun_fd, buf, r);
       if (r < 0) {
         // TODO: ignore some errno
         perror("write tun_fd error");
         break;
       }
+#if defined (DEBUG)
+      printf (">>>>>" LF);
+#endif
     }
   }
 
   close(tun_fd);
   close(udp_fd);
 
+  free (aes_ctx);
+  aes_ctx = NULL;
+
   cleanup_route_table();
 
   return 0;
 }
-
